@@ -1,88 +1,138 @@
-// meshcentral-vpnnetfile — минимальный плагин: вкладка на устройстве + два эндпоинта
-// /plugin/vpnnetfile/show — показать содержимое файла
-// /plugin/vpnnetfile/apply — применить новый контент (с бэкапом + рестарт networkd)
+'use strict';
 
+/**
+ * meshcentral-vpnnetfile — плагин для MeshCentral
+ * Вкладка на карточке устройства + два эндпоинта:
+ *   GET  /plugin/vpnnetfile/show?nodeid=...    — показать содержимое файла
+ *   POST /plugin/vpnnetfile/apply              — записать новый контент (с бэкапом) и перезапустить networkd
+ *
+ * ВАЖНО: Экспорт должен быть ИМЕННЫМ, совпадающим с config.json.shortName.
+ * В нашем случае shortName = "vpnnetfile", значит:
+ *   module.exports.vpnnetfile = function (parent) { ... }
+ */
 
-module.exports = function (parent) {
-const plugin = {};
-plugin.parent = parent; // MeshCentral plugin host
-plugin.shortName = 'vpnnetfile';
+module.exports.vpnnetfile = function (parent) {
+  const path = require('path');
+  const fs = require('fs');
 
+  const plugin = {};
+  plugin.parent = parent;               // плагин-хост
+  plugin.shortName = 'vpnnetfile';
 
-// ===============
-// ВСПОМОГАТЕЛЬНОЕ: адаптер под вашу версию MeshCentral для запуска shell на агенте
-// Замените содержимое runOnAgent на фактический вызов «Run Commands»/exec.
-// Ожидается, что вернёт текстовый stdout удалённой команды или бросит ошибку.
-async function runOnAgent(nodeid, script, opts = {}) {
-// TODO: ***** ВАЖНО *****
-// Ниже — два безопасных варианта интеграции. Выберите один и реализуйте вместо throw:
-//
-// (A) Использовать внутренний API, как это делает плагин ScriptTask:
-// - Найдите в исходниках MeshCentral методы отправки команд агенту из сервера
-// (обычно доступны через parent.parent.*). В новых версиях смотрите как
-// плагин ScriptTask вызывает выполнение скрипта на узле.
-//
-// (B) Использовать уже настроенный на сервере «Run Commands» как сервис:
-// - Если у вас есть helper/обёртка (например, task runner), вызовите её здесь.
-//
-// Возврат должен быть строкой вывода.
-throw new Error('runOnAgent() не привязан к API MeshCentral: свяжите с вашим "Run Commands". См. README.');
-}
+  // ======== Настройки плагина (можно вынести в config позже) ========
+  const TARGET_FILE = '/etc/systemd/network/10-vpn_vpn.network';
+  const ROUTE_BASE  = '/plugin/vpnnetfile';
 
+  // ======== Адаптер: запуск shell-скрипта на агенте ========
+  /**
+   * ВАЖНО: эту функцию нужно "подвязать" к вашему MeshCentral:
+   * - повторить способ, как плагин ScriptTask запускает команды;
+   * - или вызвать ваш существующий раннер.
+   *
+   * Ожидается, что функция вернёт stdout как строку.
+   */
+  async function runOnAgent(nodeid, script, opts = {}) {
+    // --------- TODO: Реализуйте запуск на агенте под вашу версию MeshCentral ----------
+    // Ниже — явная ошибка, чтобы было понятно, что адаптер не подключён.
+    // Когда подключите, верните текстовый вывод команды (stdout).
+    throw new Error(
+      'runOnAgent() не привязан к API MeshCentral. ' +
+      'Свяжите с механизмом «Run Commands»/ScriptTask и верните stdout.'
+    );
+  }
 
-// Вкладка на странице устройства (отображается как отдельная панель)
-plugin.registerPluginTab = () => ({ tabId: plugin.shortName, tabTitle: 'VPN .network' });
+  // ======== Вкладка на карточке устройства ========
+  plugin.registerPluginTab = () => ({
+    tabId: plugin.shortName,
+    tabTitle: 'VPN .network'
+  });
 
+  // ======== HTTP-маршруты плагина ========
+  plugin.hook_setupHttpHandlers = function (app, express) {
 
-// Роуты
-plugin.hook_setupHttpHandlers = function (app, express) {
-// Статика UI
-app.get('/plugin/vpnnetfile/ui', (req, res) => {
-res.sendFile(require('path').join(__dirname, 'public', 'ui.html'));
-});
-app.get('/plugin/vpnnetfile/style.css', (req, res) => {
-res.type('text/css').send(require('fs').readFileSync(require('path').join(__dirname, 'public', 'style.css'), 'utf8'));
-});
+    // UI (простая статическая страница)
+    app.get(`${ROUTE_BASE}/ui`, (req, res) => {
+      res.sendFile(path.join(__dirname, 'public', 'ui.html'));
+    });
 
+    // Статический CSS
+    app.get(`${ROUTE_BASE}/style.css`, (req, res) => {
+      res.type('text/css').send(
+        fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8')
+      );
+    });
 
-// Показ содержимого файла
-app.get('/plugin/vpnnetfile/show', async (req, res) => {
-try {
-const nodeid = req.query.nodeid;
-if (!nodeid) return res.status(400).send('nodeid обязателен');
+    // Показ содержимого файла на удалённом узле
+    app.get(`${ROUTE_BASE}/show`, async (req, res) => {
+      try {
+        const nodeid = (req.query.nodeid || '').trim();
+        if (!nodeid) return res.status(400).type('text/plain').send('nodeid обязателен');
 
+        // Скрипт только читает файл (и печатает чуть диагностической инфы)
+        const showScript = `#!/usr/bin/env bash
+set -euo pipefail
+FILE="${TARGET_FILE}"
+if [ ! -e "$FILE" ]; then
+  echo "Файл не найден: $FILE"
+  exit 2
+fi
+echo "== stat =="
+stat "$FILE" || true
+echo
+echo "== содержимое =="
+cat -n "$FILE"
+`;
 
-const showScript = `#!/usr/bin/env bash\nset -euo pipefail\nFILE="/etc/systemd/network/10-vpn_vpn.network"\nif [ ! -e \"$FILE\" ]; then\n echo \"Файл не найден: $FILE\"; exit 2;\nfi\necho \"== stat ==\"\nstat \"$FILE\" || true\necho\necho \"== содержимое ==\"\ncat -n \"$FILE\"\n`;
+        const out = await runOnAgent(nodeid, showScript);
+        res.type('text/plain').send(out);
+      } catch (e) {
+        res.status(500).type('text/plain').send(String(e && e.stack || e));
+      }
+    });
 
+    // Применение нового содержимого файла на удалённом узле
+    app.post(`${ROUTE_BASE}/apply`, express.json({ limit: '1mb' }), async (req, res) => {
+      try {
+        const { nodeid, content } = req.body || {};
+        if (!nodeid || typeof content !== 'string') {
+          return res.status(400).type('text/plain').send('nodeid и content обязательны');
+        }
+        if (!content.trim()) {
+          return res.status(400).type('text/plain').send('Пустое содержимое — нечего применять.');
+        }
 
-const out = await runOnAgent(nodeid, showScript);
-res.type('text/plain').send(out);
-} catch (e) {
-res.status(500).type('text/plain').send(String(e && e.stack || e));
-}
-});
+        // Скрипт делает бэкап и атомарно заменяет файл, затем пытается перезапустить networkd
+        const applyScript = `#!/usr/bin/env bash
+set -euo pipefail
+FILE="${TARGET_FILE}"
+TMP="$(mktemp)"
+TS="$(date +%Y%m%d-%H%M%S)"
+sudo mkdir -p "$(dirname "$FILE")"
+if [ -f "$FILE" ]; then
+  sudo cp -a "$FILE" "${FILE}.bak.${TS}"
+fi
+cat > "$TMP" <<'EOF'
+${content}
+EOF
+sudo install -m 0644 -o root -g root "$TMP" "$FILE"
+rm -f "$TMP"
+if systemctl is-enabled --quiet systemd-networkd 2>/dev/null; then
+  sudo networkctl reload || true
+  sudo systemctl restart systemd-networkd
+else
+  echo "Внимание: systemd-networkd не включён (enable + start при необходимости)."
+fi
+echo "OK: ${TARGET_FILE} обновлён"
+`;
 
+        const out = await runOnAgent(String(nodeid).trim(), applyScript);
+        res.type('text/plain').send(out);
+      } catch (e) {
+        res.status(500).type('text/plain').send(String(e && e.stack || e));
+      }
+    });
+  };
 
-// Применение изменений файла
-app.post('/plugin/vpnnetfile/apply', express.json({ limit: '1mb' }), async (req, res) => {
-try {
-const { nodeid, content } = req.body || {};
-if (!nodeid || typeof content !== 'string') return res.status(400).send('nodeid и content обязательны');
-
-
-const applyScript = `#!/usr/bin/env bash\nset -euo pipefail\nFILE=\"/etc/systemd/network/10-vpn_vpn.network\"\nTMP=\"$(mktemp)\"; TS=\"$(date +%Y%m%d-%H%M%S)\"\nsudo mkdir -p /etc/systemd/network\n[ -f \"$FILE\" ] && sudo cp -a \"$FILE\" \"${FILE}.bak.${TS}\" || true\ncat > \"$TMP\" <<'EOF'\n${content}\nEOF\nsudo install -m 0644 -o root -g root \"$TMP\" \"$FILE\"; rm -f \"$TMP\"\nif systemctl is-enabled --quiet systemd-networkd 2>/dev/null; then\n sudo networkctl reload || true\n sudo systemctl restart systemd-networkd\nfi\necho \"OK: $FILE обновлён\"\n`;
-
-
-const out = await runOnAgent(nodeid, applyScript);
-res.type('text/plain').send(out);
-} catch (e) {
-res.status(500).type('text/plain').send(String(e && e.stack || e));
-}
-});
-};
-
-
-// Экспорт: чтобы вкладка появилась в UI
-plugin.exports = ['registerPluginTab'];
-return plugin;
+  // Возвращаем объект плагина
+  return plugin;
 };
