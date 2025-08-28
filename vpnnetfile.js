@@ -6,9 +6,7 @@
  *   GET  /plugin/vpnnetfile/show?nodeid=...    — показать содержимое файла
  *   POST /plugin/vpnnetfile/apply              — записать новый контент (с бэкапом) и перезапустить networkd
  *
- * ВАЖНО: Экспорт должен быть ИМЕННЫМ, совпадающим с config.json.shortName.
- * В нашем случае shortName = "vpnnetfile", значит:
- *   module.exports.vpnnetfile = function (parent) { ... }
+ * Экспорт должен быть ИМЕННЫМ и совпадать с config.json.shortName: "vpnnetfile".
  */
 
 module.exports.vpnnetfile = function (parent) {
@@ -16,59 +14,52 @@ module.exports.vpnnetfile = function (parent) {
   const fs = require('fs');
 
   const plugin = {};
-  plugin.parent = parent;               // плагин-хост
+  plugin.parent = parent;
   plugin.shortName = 'vpnnetfile';
 
-  // ======== Настройки плагина (можно вынести в config позже) ========
+  // ===== Настройки =====
   const TARGET_FILE = '/etc/systemd/network/10-vpn_vpn.network';
   const ROUTE_BASE  = '/plugin/vpnnetfile';
 
-  // ======== Адаптер: запуск shell-скрипта на агенте ========
-  /**
-   * ВАЖНО: эту функцию нужно "подвязать" к вашему MeshCentral:
-   * - повторить способ, как плагин ScriptTask запускает команды;
-   * - или вызвать ваш существующий раннер.
-   *
-   * Ожидается, что функция вернёт stdout как строку.
-   */
+  // ===== Адаптер запуска команд на агенте =====
   async function runOnAgent(nodeid, script, opts = {}) {
-    // --------- TODO: Реализуйте запуск на агенте под вашу версию MeshCentral ----------
-    // Ниже — явная ошибка, чтобы было понятно, что адаптер не подключён.
-    // Когда подключите, верните текстовый вывод команды (stdout).
+    // TODO: привяжите к вашему способу удалённого запуска (Run Commands / ScriptTask).
+    // Верните stdout (строкой).
     throw new Error(
       'runOnAgent() не привязан к API MeshCentral. ' +
       'Свяжите с механизмом «Run Commands»/ScriptTask и верните stdout.'
     );
   }
 
-  // ======== Вкладка на карточке устройства ========
+  // Вкладка на карточке устройства
   plugin.registerPluginTab = () => ({
     tabId: plugin.shortName,
     tabTitle: 'VPN .network'
   });
 
-  // ======== HTTP-маршруты плагина ========
-  plugin.hook_setupHttpHandlers = function (app, express) {
+  // Хук: регистрируем HTTP-эндпоинты
+  // ВАЖНО: первый аргумент — webserver, express-приложение лежит в webserver.app
+  plugin.hook_setupHttpHandlers = function (webserver, express) {
+    const app = webserver.app; // <-- это реальный Express
 
-    // UI (простая статическая страница)
+    // UI
     app.get(`${ROUTE_BASE}/ui`, (req, res) => {
       res.sendFile(path.join(__dirname, 'public', 'ui.html'));
     });
 
-    // Статический CSS
+    // CSS
     app.get(`${ROUTE_BASE}/style.css`, (req, res) => {
       res.type('text/css').send(
         fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8')
       );
     });
 
-    // Показ содержимого файла на удалённом узле
+    // Просмотр файла
     app.get(`${ROUTE_BASE}/show`, async (req, res) => {
       try {
-        const nodeid = (req.query.nodeid || '').trim();
+        const nodeid = String(req.query.nodeid || '').trim();
         if (!nodeid) return res.status(400).type('text/plain').send('nodeid обязателен');
 
-        // Скрипт только читает файл (и печатает чуть диагностической инфы)
         const showScript = `#!/usr/bin/env bash
 set -euo pipefail
 FILE="${TARGET_FILE}"
@@ -82,7 +73,6 @@ echo
 echo "== содержимое =="
 cat -n "$FILE"
 `;
-
         const out = await runOnAgent(nodeid, showScript);
         res.type('text/plain').send(out);
       } catch (e) {
@@ -90,7 +80,7 @@ cat -n "$FILE"
       }
     });
 
-    // Применение нового содержимого файла на удалённом узле
+    // Применение изменений
     app.post(`${ROUTE_BASE}/apply`, express.json({ limit: '1mb' }), async (req, res) => {
       try {
         const { nodeid, content } = req.body || {};
@@ -101,7 +91,6 @@ cat -n "$FILE"
           return res.status(400).type('text/plain').send('Пустое содержимое — нечего применять.');
         }
 
-        // Скрипт делает бэкап и атомарно заменяет файл, затем пытается перезапустить networkd
         const applyScript = `#!/usr/bin/env bash
 set -euo pipefail
 FILE="${TARGET_FILE}"
@@ -124,7 +113,6 @@ else
 fi
 echo "OK: ${TARGET_FILE} обновлён"
 `;
-
         const out = await runOnAgent(String(nodeid).trim(), applyScript);
         res.type('text/plain').send(out);
       } catch (e) {
@@ -133,6 +121,8 @@ echo "OK: ${TARGET_FILE} обновлён"
     });
   };
 
-  // Возвращаем объект плагина
+  // Экспорт для UI (чтобы вкладка отобразилась в интерфейсе)
+  plugin.exports = ['registerPluginTab'];
+
   return plugin;
 };
