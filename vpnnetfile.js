@@ -1,161 +1,137 @@
-'use strict';
-
-/**
- * meshcentral-vpnnetfile — плагин для MeshCentral
- * UI-вкладка + эндпоинты:
- *   GET  /plugin/vpnnetfile/show?nodeid=...    — показать содержимое файла
- *   POST /plugin/vpnnetfile/apply              — записать новый контент (с бэкапом) и перезапустить networkd
- *
- * Экспорт должен быть ИМЕННЫМ и совпадать с config.json.shortName: "vpnnetfile".
- */
+// vpnnetfile.js
+// Плагин MeshCentral: вкладка "VPN .network" + серверные роуты
+// Размещать в: meshcentral-data/plugins/vpnnetfile/vpnnetfile.js
 
 module.exports.vpnnetfile = function (parent) {
-  const path = require('path');
-  const fs = require('fs');
-
   const plugin = {};
-  plugin.parent = parent;
   plugin.shortName = 'vpnnetfile';
+  plugin.title = 'VPN .network';
+  plugin.parent = parent;
 
-  // ===== Настройки =====
-  const TARGET_FILE = '/etc/systemd/network/10-vpn_vpn.network';
-  const ROUTE_BASE  = '/plugin/vpnnetfile';
+  const ROUTE_BASE = '/plugin/vpnnetfile';
+  const bodyParser = require('body-parser');
 
-  // ===== Адаптер запуска команд на агенте =====
-  async function runOnAgent(nodeid, script, opts = {}) {
-    // TODO: привяжите к вашему способу удалённого запуска (Run Commands / ScriptTask).
-    // Верните stdout (строкой).
-    throw new Error(
-      'runOnAgent() не привязан к API MeshCentral. ' +
-      'Свяжите с механизмом «Run Commands»/ScriptTask и верните stdout.'
-    );
-  }
+  // -------------------------
+  // Back-End: HTTP handlers
+  // -------------------------
+  plugin.hook_setupHttpHandlers = function (app /* webserver */, _server) {
+    // В разных версиях webserver передаётся по-разному — берём Express-приложение надёжно.
+    const expressApp =
+      (app && app.app && typeof app.app.get === 'function' && app.app) ||
+      (app && typeof app.get === 'function' && app) ||
+      (_server && _server.app && typeof _server.app.get === 'function' && _server.app);
 
-  // ===== Вспомогательное: простой JSON-парсер без express.json =====
-  function readJson(req) {
-    return new Promise((resolve, reject) => {
-      let data = '';
-      req.on('data', (chunk) => {
-        data += chunk;
-        // простая защита от слишком больших тел (1 МБ)
-        if (data.length > 1 * 1024 * 1024) {
-          req.destroy();
-          reject(new Error('Payload too large'));
-        }
-      });
-      req.on('end', () => {
-        try {
-          const obj = data ? JSON.parse(data) : {};
-          resolve(obj);
-        } catch (e) {
-          reject(new Error('Invalid JSON'));
-        }
-      });
-      req.on('error', reject);
-    });
-  }
-
-  // ===== Вкладка на карточке устройства =====
-  plugin.registerPluginTab = () => ({
-    tabId: plugin.shortName,
-    tabTitle: 'VPN .network'
-  });
-
-  // ===== HTTP-маршруты =====
-  // ВАЖНО: MeshCentral передаёт webserver, Express-приложение лежит в webserver.app
-  plugin.hook_setupHttpHandlers = function (webserver /*, _maybeExpress */) {
-    const app = (webserver && webserver.app) ? webserver.app : webserver;
-    if (!app || typeof app.get !== 'function') {
-      throw new Error('Не удалось получить Express-приложение (webserver.app).');
+    if (!expressApp) {
+      console.log('[vpnnetfile] Не удалось получить express app');
+      return;
     }
 
-    // UI
-    app.get(`${ROUTE_BASE}/ui`, (req, res) => {
-      res.sendFile(path.join(__dirname, 'public', 'ui.html'));
+    // Страница UI плагина (в iframe на вкладке)
+    expressApp.get(ROUTE_BASE, function (req, res) {
+      const nodeid = req.query.nodeid || req.query.id || '';
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      res.send(`<!doctype html>
+<html><head><meta charset="utf-8"><title>VPN .network</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,sans-serif;padding:12px;}
+  h2{margin:0 0 8px 0}
+  #info{margin:0 0 12px 0;color:#555}
+  button{padding:6px 10px;border:1px solid #999;border-radius:6px;background:#f5f5f5;cursor:pointer}
+  pre{margin-top:12px;background:#0b0b0b;color:#9ef59e;padding:12px;border-radius:8px;overflow:auto;max-height:64vh}
+</style>
+</head>
+<body>
+  <h2>VPN .network — просмотр</h2>
+  <div id="info">Устройство: <code>${nodeid || '(nodeid не передан)'}</code></div>
+  <button id="btnRead">Показать содержимое файла</button>
+  <pre id="out">(нажмите «Показать содержимое файла»)</pre>
+
+  <script>
+  (function(){
+    var nodeid = ${JSON.stringify(nodeid)};
+    function read(){
+      fetch('${ROUTE_BASE}/read?nodeid=' + encodeURIComponent(nodeid))
+        .then(r => r.ok ? r.text() : r.text().then(t => Promise.reject(new Error(t))))
+        .then(txt => { document.getElementById('out').textContent = txt || '[пусто]'; })
+        .catch(e => { document.getElementById('out').textContent = 'Ошибка: ' + e.message; });
+    }
+    document.getElementById('btnRead').addEventListener('click', read);
+  })();
+  </script>
+</body></html>`);
     });
 
-    // CSS
-    app.get(`${ROUTE_BASE}/style.css`, (req, res) => {
-      res.type('text/css').send(
-        fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8')
-      );
+    // Заглушка чтения файла (само чтение через агент допишем следующим шагом)
+    expressApp.get(ROUTE_BASE + '/read', function (req, res) {
+      const nodeid = req.query.nodeid || req.query.id;
+      if (!nodeid) return res.status(400).send('nodeid is required');
+      // Здесь будет обращение к агенту и возврат содержимого файла.
+      // Пока вернём заглушку, чтобы было видно, что UI/маршруты работают.
+      return res
+        .status(501)
+        .send('[vpnnetfile] Чтение через агент пока не реализовано в этой сборке (UI и вкладка работают)');
     });
 
-    // Просмотр файла
-    app.get(`${ROUTE_BASE}/show`, async (req, res) => {
-      try {
-        const nodeid = String((req.query && req.query.nodeid) || '').trim();
-        if (!nodeid) return res.status(400).type('text/plain').send('nodeid обязателен');
-
-        const showScript = `#!/usr/bin/env bash
-set -euo pipefail
-FILE="${TARGET_FILE}"
-if [ ! -e "$FILE" ]; then
-  echo "Файл не найден: $FILE"
-  exit 2
-fi
-echo "== stat =="
-stat "$FILE" || true
-echo
-echo "== содержимое =="
-cat -n "$FILE"
-`;
-        const out = await runOnAgent(nodeid, showScript);
-        res.type('text/plain').send(out);
-      } catch (e) {
-        res.status(500).type('text/plain').send(String(e && e.stack || e));
+    // Пример обработчика /apply (на будущее, когда будем писать файл)
+    expressApp.post(
+      ROUTE_BASE + '/apply',
+      bodyParser.json({ limit: '1mb' }),
+      function (req, res) {
+        // const { nodeid, content } = req.body || {};
+        return res
+          .status(501)
+          .send('[vpnnetfile] Запись файла будет добавлена после проверки чтения');
       }
-    });
+    );
 
-    // Применение изменений (без express.json)
-    app.post(`${ROUTE_BASE}/apply`, async (req, res) => {
-      try {
-        const body = await readJson(req);
-        const nodeid = body && body.nodeid;
-        const content = body && body.content;
-
-        if (!nodeid || typeof content !== 'string') {
-          return res.status(400).type('text/plain').send('nodeid и content обязательны');
-        }
-        if (!content.trim()) {
-          return res.status(400).type('text/plain').send('Пустое содержимое — нечего применять.');
-        }
-
-        const applyScript = `#!/usr/bin/env bash
-set -euo pipefail
-FILE="${TARGET_FILE}"
-TMP="$(mktemp)"
-TS="$(date +%Y%m%d-%H%M%S)"
-sudo mkdir -p "$(dirname "$FILE")"
-if [ -f "$FILE" ]; then
-  sudo cp -a "$FILE" "${FILE}.bak.${TS}"
-fi
-cat > "$TMP" <<'EOF'
-${content}
-EOF
-sudo install -m 0644 -o root -g root "$TMP" "$FILE"
-rm -f "$TMP"
-if systemctl is-enabled --quiet systemd-networkd 2>/dev/null; then
-  sudo networkctl reload || true
-  sudo systemctl restart systemd-networkd
-else
-  echo "Внимание: systemd-networkd не включён (enable + start при необходимости)."
-fi
-echo "OK: ${TARGET_FILE} обновлён"
-`;
-        const out = await runOnAgent(String(nodeid).trim(), applyScript);
-        res.type('text/plain').send(out);
-      } catch (e) {
-        if (e && /Invalid JSON|Payload too large/.test(String(e))) {
-          return res.status(400).type('text/plain').send(String(e.message || e));
-        }
-        res.status(500).type('text/plain').send(String(e && e.stack || e));
-      }
-    });
+    console.log('[vpnnetfile] HTTP handlers зарегистрированы');
   };
 
-  // Экспорт для UI (чтобы вкладка отобразилась в интерфейсе)
-  plugin.exports = ['registerPluginTab'];
+  // --------------------------------
+  // Web UI: вкладка и наполнение
+  // --------------------------------
+  // Эта функция исполняется в БРАУЗЕРЕ. Она просто сообщает UI,
+  // что нужна вкладка с указанным ID и заголовком.
+  plugin.registerPluginTab = function () {
+    return { tabId: 'vpnnetfile', tabTitle: 'VPN .network' };
+  };
+
+  // Когда пользователь открывает карточку устройства — наполняем DIV вкладки iframe-ом
+  plugin.onDeviceRefreshEnd = function () {
+    try {
+      var tabId = 'vpnnetfile';
+      var container =
+        document.getElementById(tabId) ||
+        document.getElementById('p_' + tabId) ||
+        document.querySelector('#' + CSS.escape(tabId));
+      if (!container) return;
+
+      // пытаемся получить id выбранного узла из глобалов MeshCentral
+      var nodeid = null;
+      try {
+        if (typeof currentNode !== 'undefined' && currentNode && currentNode._id) nodeid = currentNode._id;
+        else if (typeof meshserver !== 'undefined' && meshserver && meshserver.currentNode && meshserver.currentNode._id) nodeid = meshserver.currentNode._id;
+      } catch (_) {}
+
+      var url = '/plugin/vpnnetfile' + (nodeid ? ('?nodeid=' + encodeURIComponent(nodeid)) : '');
+      if (!container.__vpnnetfile_iframe) {
+        var iframe = document.createElement('iframe');
+        iframe.src = url;
+        iframe.style.width = '100%';
+        iframe.style.height = 'calc(100vh - 210px)';
+        iframe.style.border = '0';
+        container.appendChild(iframe);
+        container.__vpnnetfile_iframe = iframe;
+      } else {
+        container.__vpnnetfile_iframe.src = url;
+      }
+    } catch (e) {
+      try { console.log('[vpnnetfile] onDeviceRefreshEnd error', e); } catch(_) {}
+    }
+  };
+
+  // Обязательно указать, какие функции экспортируются в Web-UI
+  plugin.exports = ['registerPluginTab', 'onDeviceRefreshEnd'];
 
   return plugin;
 };
