@@ -10,5 +10,5 @@
 "configUrl": "https://raw.githubusercontent.com/BAlekssei/meshcentral-vpnnetfile/main/config.json",
 "downloadUrl": "https://github.com/BAlekssei/meshcentral-vpnnetfile/archive/refs/heads/main.zip",
 "repository": { "type": "git", "url": "https://github.com/BAlekssei/meshcentral-vpnnetfile.git" },
-"meshCentralCompat": ">=1.35.0"
+"meshCentralCompat": ">=1.5.0"
 }
