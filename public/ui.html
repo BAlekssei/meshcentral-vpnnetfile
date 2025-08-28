@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VPN .network</title>
+<link rel="stylesheet" href="/plugin/vpnnetfile/style.css">
+</head>
+<body>
+<div class="wrap">
+<h2>/etc/systemd/network/10-vpn_vpn.network</h2>
+
+
+<div class="row">
+<label>Содержимое (для применения):</label>
+<textarea id="body" placeholder="[Match]\nName=vpn*\n\n[Network]\nDHCP=no\nAddress=10.10.10.2/24\nGateway=10.10.10.1\nDNS=1.1.1.1"></textarea>
+</div>
+
+
+<div class="buttons">
+<button id="btnShow">Показать файл</button>
+<button id="btnApply">Применить изменения</button>
+</div>
+
+
+<pre id="out" class="out" tabindex="0"></pre>
+</div>
+
+
+<script>
+const qs = new URLSearchParams(location.search);
+const nodeid = qs.get('nodeid');
+const out = document.getElementById('out');
+const body = document.getElementById('body');
+
+
+function append(txt){ out.textContent = String(txt || ''); }
+
+
+async function showFile(){
+if (!nodeid) { append('Ошибка: нет nodeid'); return; }
+append('Загрузка...');
+const r = await fetch(`/plugin/vpnnetfile/show?nodeid=${encodeURIComponent(nodeid)}`);
+append(await r.text());
+}
+
+
+async function apply(){
+if (!nodeid) { append('Ошибка: нет nodeid'); return; }
+const content = body.value;
+if (!content.trim()) { append('Пустое содержимое — нечего применять.'); return; }
+append('Применение...');
+const r = await fetch('/plugin/vpnnetfile/apply', {
+method: 'POST', headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({ nodeid, content })
+});
+append(await r.text());
+}
+
+
+document.getElementById('btnShow').addEventListener('click', showFile);
+document.getElementById('btnApply').addEventListener('click', apply);
+</script>
+</body>
+</html>

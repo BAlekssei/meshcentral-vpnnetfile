@@ -1,0 +1,10 @@
+{
+"name": "meshcentral-vpnnetfile",
+"version": "0.1.0",
+"description": "MeshCentral plugin: view & edit /etc/systemd/network/10-vpn_vpn.network on Linux nodes",
+"main": "vpnnetfile.js",
+"author": "you",
+"license": "MIT",
+"keywords": ["meshcentral", "plugin", "systemd-networkd", "network"],
+"engines": { "node": ">=14" }
+}
