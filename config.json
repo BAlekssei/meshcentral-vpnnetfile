@@ -1,7 +1,7 @@
 {
 "name": "VPN Network File",
 "shortName": "vpnnetfile",
-"version": "0.0.7",
+"version": "0.0.8",
 "author": "you",
 "description": "Редактор /etc/systemd/network/10-vpn_vpn.network для Linux-узлов",
 "hasAdminPanel": false,
@@ -10,5 +10,5 @@
 "configUrl": "https://raw.githubusercontent.com/BAlekssei/meshcentral-vpnnetfile/main/config.json",
 "downloadUrl": "https://github.com/BAlekssei/meshcentral-vpnnetfile/archive/refs/heads/main.zip",
 "repository": { "type": "git", "url": "https://github.com/BAlekssei/meshcentral-vpnnetfile.git" },
-"meshCentralCompat": ">=1.5.0"
+"meshCentralCompat": ">=1.1.35"
 }
