@@ -2,7 +2,7 @@
 
 /**
  * meshcentral-vpnnetfile — плагин для MeshCentral
- * Вкладка на карточке устройства + два эндпоинта:
+ * UI-вкладка + эндпоинты:
  *   GET  /plugin/vpnnetfile/show?nodeid=...    — показать содержимое файла
  *   POST /plugin/vpnnetfile/apply              — записать новый контент (с бэкапом) и перезапустить networkd
  *
@@ -31,16 +31,43 @@ module.exports.vpnnetfile = function (parent) {
     );
   }
 
-  // Вкладка на карточке устройства
+  // ===== Вспомогательное: простой JSON-парсер без express.json =====
+  function readJson(req) {
+    return new Promise((resolve, reject) => {
+      let data = '';
+      req.on('data', (chunk) => {
+        data += chunk;
+        // простая защита от слишком больших тел (1 МБ)
+        if (data.length > 1 * 1024 * 1024) {
+          req.destroy();
+          reject(new Error('Payload too large'));
+        }
+      });
+      req.on('end', () => {
+        try {
+          const obj = data ? JSON.parse(data) : {};
+          resolve(obj);
+        } catch (e) {
+          reject(new Error('Invalid JSON'));
+        }
+      });
+      req.on('error', reject);
+    });
+  }
+
+  // ===== Вкладка на карточке устройства =====
   plugin.registerPluginTab = () => ({
     tabId: plugin.shortName,
     tabTitle: 'VPN .network'
   });
 
-  // Хук: регистрируем HTTP-эндпоинты
-  // ВАЖНО: первый аргумент — webserver, express-приложение лежит в webserver.app
-  plugin.hook_setupHttpHandlers = function (webserver, express) {
-    const app = webserver.app; // <-- это реальный Express
+  // ===== HTTP-маршруты =====
+  // ВАЖНО: MeshCentral передаёт webserver, Express-приложение лежит в webserver.app
+  plugin.hook_setupHttpHandlers = function (webserver /*, _maybeExpress */) {
+    const app = (webserver && webserver.app) ? webserver.app : webserver;
+    if (!app || typeof app.get !== 'function') {
+      throw new Error('Не удалось получить Express-приложение (webserver.app).');
+    }
 
     // UI
     app.get(`${ROUTE_BASE}/ui`, (req, res) => {
@@ -57,7 +84,7 @@ module.exports.vpnnetfile = function (parent) {
     // Просмотр файла
     app.get(`${ROUTE_BASE}/show`, async (req, res) => {
       try {
-        const nodeid = String(req.query.nodeid || '').trim();
+        const nodeid = String((req.query && req.query.nodeid) || '').trim();
         if (!nodeid) return res.status(400).type('text/plain').send('nodeid обязателен');
 
         const showScript = `#!/usr/bin/env bash
@@ -80,10 +107,13 @@ cat -n "$FILE"
       }
     });
 
-    // Применение изменений
-    app.post(`${ROUTE_BASE}/apply`, express.json({ limit: '1mb' }), async (req, res) => {
+    // Применение изменений (без express.json)
+    app.post(`${ROUTE_BASE}/apply`, async (req, res) => {
       try {
-        const { nodeid, content } = req.body || {};
+        const body = await readJson(req);
+        const nodeid = body && body.nodeid;
+        const content = body && body.content;
+
         if (!nodeid || typeof content !== 'string') {
           return res.status(400).type('text/plain').send('nodeid и content обязательны');
         }
@@ -116,6 +146,9 @@ echo "OK: ${TARGET_FILE} обновлён"
         const out = await runOnAgent(String(nodeid).trim(), applyScript);
         res.type('text/plain').send(out);
       } catch (e) {
+        if (e && /Invalid JSON|Payload too large/.test(String(e))) {
+          return res.status(400).type('text/plain').send(String(e.message || e));
+        }
         res.status(500).type('text/plain').send(String(e && e.stack || e));
       }
     });
