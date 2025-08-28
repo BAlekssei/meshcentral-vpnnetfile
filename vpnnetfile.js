@@ -1,208 +1,187 @@
 'use strict';
 
 /**
- * meshcentral-vpnnetfile — плагин MeshCentral
- * Сервер: HTTP-роуты
- * Клиент: вкладка "VPN .network" на карточке устройства (Web-UI хуки)
- *
- * Экспорт должен быть именованным: module.exports.vpnnetfile = function(parent) { ... }
- * Имя "vpnnetfile" = shortName из config.json.
+ * MeshCentral plugin: vpnnetfile
+ * Версия: 0.3.2
+ * - Эндпоинты защищены (нужна активная сессия).
+ * - Кнопка вставляется в панель «Действия» сразу после Run.
+ * - Если панель не найдена — резервный ярлык в ПРАВОМ ВЕРХНЕМ углу (под синим баром).
+ * - /read пока 501 — после утверждения UI подключу чтение с агента.
  */
 
-module.exports.vpnnetfile = function (parent) {
-  const path = require('path');
-  const fs = require('fs');
+module.exports.vpnnetfile = function init(parent) {
+  const PLUGIN = 'vpnnetfile';
+  const ROUTE_BASE = '/plugin/vpnnetfile';
+  const NETFILE = '/etc/systemd/network/10-vpn_vpn.network';
 
-  const plugin = {};
-  plugin.parent = parent;
-  plugin.shortName = 'vpnnetfile';
+  const p = { parent, shortName: PLUGIN, version: '0.3.2' };
+  const log = (...a) => { try { parent.debug('[vpnnetfile]', ...a); } catch { console.log('[vpnnetfile]', ...a); } };
 
-  // ------------ настройки ------------
-  const TARGET_FILE = '/etc/systemd/network/10-vpn_vpn.network';
-  const ROUTE_BASE  = '/plugin/vpnnetfile';
+  // ─────────────── BACKEND: защищённые маршруты ───────────────
+  p.hook_setupHttpHandlers = function (app /*, webserver, db */) {
+    const expressApp =
+      (app && typeof app.get === 'function') ? app :
+      (app && app.app && typeof app.app.get === 'function') ? app.app :
+      (p.parent && p.parent.webserver && p.parent.webserver.app && typeof p.parent.webserver.app.get === 'function') ? p.parent.webserver.app :
+      null;
 
-  // ------------ адаптер удалённого запуска ------------
-  // Привяжите к вашему Run Commands/ScriptTask и верните stdout (строкой).
-  async function runOnAgent(nodeid, script) {
-    throw new Error(
-      'runOnAgent() не привязан к API MeshCentral. ' +
-      'Подключите механизм удалённого запуска и верните stdout.'
-    );
-  }
+    if (!expressApp) { log('hook_setupHttpHandlers: express app not found, routes not registered.'); return; }
 
-  // ------------ простой JSON-парсер (вместо express.json) ------------
-  function readJson(req) {
-    return new Promise((resolve, reject) => {
-      let data = '';
-      req.on('data', (chunk) => {
-        data += chunk;
-        if (data.length > 1 * 1024 * 1024) { // 1MB
-          req.destroy();
-          reject(new Error('Payload too large'));
-        }
-      });
-      req.on('end', () => {
-        try { resolve(data ? JSON.parse(data) : {}); }
-        catch { reject(new Error('Invalid JSON')); }
-      });
-      req.on('error', reject);
-    });
-  }
-
-  // ========== BACKEND: HTTP-эндпоинты ==========
-  // В новых и старых версиях webserver Express доступен как webserver.app
-  plugin.hook_setupHttpHandlers = function (webserver /*, express */) {
-    const app = (webserver && webserver.app) ? webserver.app : webserver;
-    if (!app || typeof app.get !== 'function') {
-      console.log('[vpnnetfile] Express app not found (webserver.app)');
-      return;
+    function requireLogin(req, res, next) {
+      const authed = !!(req && ((req.session && (req.session.userid || req.session.user)) || req.user));
+      if (authed) return next();
+      const wantsHtml = String(req.headers.accept || '').includes('text/html');
+      return wantsHtml ? res.redirect('/') : res.status(401).type('text/plain').send('Unauthorized');
     }
 
-    // Страница UI (грузится во вкладке через iframe)
-    app.get(`${ROUTE_BASE}`, (req, res) => {
-      const nodeid = (req.query && (req.query.nodeid || req.query.id)) || '';
-      res.type('html').send(`<!doctype html>
+    expressApp.get(`${ROUTE_BASE}/health`, requireLogin, (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      res.json({ ok: true, plugin: PLUGIN, version: p.version });
+    });
+
+    expressApp.get(`${ROUTE_BASE}/view`, requireLogin, (req, res) => {
+      const nodeid = (req.query && req.query.nodeid) ? String(req.query.nodeid) : '';
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      res.set('Cache-Control', 'no-store');
+      res.end(`<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
-<title>VPN .network</title>
+<title>VPN .network — просмотр</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:12px;background:#0b1117;color:#e6edf3}
-  h2{margin:0 0 8px}
-  #info{opacity:.85;margin-bottom:10px}
-  button{padding:6px 12px;border:1px solid #28425e;border-radius:8px;background:#0e2238;color:#d6e3f2;cursor:pointer}
-  button:hover{filter:brightness(1.1)}
-  pre{margin-top:10px;background:#0e1621;border:1px solid #233041;border-radius:8px;padding:10px;min-height:140px;max-height:58vh;overflow:auto;white-space:pre-wrap}
+  body{background:#0b1220;color:#d7e1ff;font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:0}
+  .wrap{max-width:1000px;margin:0 auto;padding:16px}
+  .bar{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+  button{padding:8px 12px;border:0;border-radius:8px;cursor:pointer;background:#2a66ff;color:#fff}
+  button:hover{filter:brightness(1.05)}
+  pre{background:#0f172a;border:1px solid #223;padding:12px;border-radius:8px;overflow:auto;min-height:220px;white-space:pre-wrap}
+  .muted{opacity:.8}
 </style>
-</head><body>
-  <h2>VPN .network — просмотр</h2>
-  <div id="info">Устройство: <code>${nodeid || '(nodeid не передан)'}</code></div>
-  <button id="btnRead">Показать содержимое файла</button>
-  <pre id="out">(нажмите «Показать содержимое файла»)</pre>
+</head>
+<body>
+<div class="wrap">
+  <h1>VPN .network — просмотр</h1>
+  <div class="muted">Устройство: <code>${nodeid || '—'}</code></div>
+  <div class="bar">
+    <button id="btnShow">Показать содержимое файла</button>
+    <a href="javascript:history.back()">← Вернуться</a>
+  </div>
+  <pre id="out">Нажмите «Показать содержимое файла».\n\nПуть: ${NETFILE}\n\n(Пока заглушка: backend вернёт 501)</pre>
+</div>
 <script>
-(function(){
-  var nodeid = ${JSON.stringify(nodeid)};
-  var out = document.getElementById('out');
-  function read(){
-    if(!nodeid){ out.textContent='Нет nodeid'; return; }
-    out.textContent='Загрузка...';
-    fetch('${ROUTE_BASE}/read?nodeid=' + encodeURIComponent(nodeid))
-      .then(r => r.ok ? r.text() : r.text().then(t => Promise.reject(new Error(t))))
-      .then(txt => { out.textContent = txt || '[пусто]'; })
-      .catch(e => { out.textContent = 'Ошибка: ' + e.message; });
+document.getElementById('btnShow').addEventListener('click', async () => {
+  const out = document.getElementById('out');
+  out.textContent = 'Запрос...';
+  try{
+    const r = await fetch('/plugin/vpnnetfile/read?nodeid=' + encodeURIComponent('${nodeid}'), { credentials:'same-origin', cache:'no-store' });
+    const txt = await r.text();
+    out.textContent = txt;
+  }catch(e){
+    out.textContent = 'Ошибка запроса: ' + (e?.message || e);
   }
-  document.getElementById('btnRead').addEventListener('click', read);
-})();
+});
 </script>
 </body></html>`);
     });
 
-    // Просмотр файла (пока можно вернуть заглушку, если runOnAgent не привязан)
-    app.get(`${ROUTE_BASE}/read`, async (req, res) => {
-      try {
-        const nodeid = String(((req.query && (req.query.nodeid || req.query.id)) || '')).trim();
-        if (!nodeid) return res.status(400).type('text/plain').send('nodeid обязателен');
-
-        const showScript = `#!/usr/bin/env bash
-set -euo pipefail
-FILE="${TARGET_FILE}"
-if [ ! -e "$FILE" ]; then
-  echo "Файл не найден: $FILE"
-  exit 2
-fi
-echo "== stat =="
-stat "$FILE" || true
-echo
-echo "== содержимое =="
-cat -n "$FILE"
-`;
-        const out = await runOnAgent(nodeid, showScript);
-        res.type('text/plain').send(out);
-      } catch (e) {
-        res.status(/Invalid JSON|Payload too large/.test(String(e)) ? 400 : 501)
-           .type('text/plain').send(String(e && e.message || e));
-      }
+    expressApp.get(`${ROUTE_BASE}/read`, requireLogin, (req, res) => {
+      res.status(501).type('text/plain; charset=utf-8').set('Cache-Control','no-store')
+         .end('501 Not Implemented\\n\\nЗаготовка чтения файла на агенте: ' +
+              '${NETFILE}\\nnodeid=' + (req.query.nodeid||''));
     });
 
-    // Применение (пока не используем — только просмотр)
-    app.post(`${ROUTE_BASE}/apply`, async (req, res) => {
-      try {
-        const body = await readJson(req);
-        const nodeid = body && body.nodeid;
-        const content = body && body.content;
-        if (!nodeid || typeof content !== 'string') {
-          return res.status(400).type('text/plain').send('nodeid и content обязательны');
-        }
-        return res.status(501).type('text/plain').send('[vpnnetfile] Запись пока отключена (сначала проверим просмотр)');
-      } catch (e) {
-        res.status(400).type('text/plain').send(String(e && e.message || e));
-      }
-    });
-
-    // Статика для css, если понадобиться внешний файл
-    app.get(`${ROUTE_BASE}/style.css`, (req, res) => {
-      const cssPath = path.join(__dirname, 'public', 'style.css');
-      try {
-        if (fs.existsSync(cssPath)) {
-          res.type('text/css').send(fs.readFileSync(cssPath, 'utf8'));
-        } else {
-          res.status(404).send('not found');
-        }
-      } catch {
-        res.status(500).send('error');
-      }
-    });
-
-    console.log('[vpnnetfile] HTTP handlers registered');
+    log('HTTP routes registered at', ROUTE_BASE);
   };
 
-  // ========== WEB UI: вкладка и наполнение ==========
-  // 1) регистрируем вкладку объектом (надёжнее, чем функцией)
-  plugin.registerPluginTab = { tabId: plugin.shortName, tabTitle: 'VPN .network' };
+  // ─────────────── WEB UI: кнопка выше ───────────────
+  p.onWebUIStartupEnd = function () { try { console.log('[vpnnetfile] webui ready'); } catch {} };
 
-  // 2) когда устройство выбрано — вставляем iframe с нашим UI
-  plugin.onDeviceRefreshEnd = function () {
+  p.onDeviceRefreshEnd = function () {
     try {
-      // лог в браузере для быстрой проверки
-      try { console.log('[vpnnetfile] ui loaded'); } catch (_){}
-
-      // пытаемся получить контейнер вкладки
-      var container =
-        document.getElementById(plugin.shortName) ||
-        document.getElementById('p_' + plugin.shortName) ||
-        document.querySelector('#' + plugin.shortName + ', #p_' + plugin.shortName);
-      if (!container) return; // UI ещё не создал div — просто выходим, вызов повторится
-
-      // определяем nodeid
+      // nodeid
       var nodeid = null;
-      try {
-        if (typeof currentNode !== 'undefined' && currentNode && currentNode._id) nodeid = currentNode._id;
-      } catch(_){}
-      if (!nodeid) {
-        try {
-          var u = new URL(location.href);
-          nodeid = u.searchParams.get('id') || nodeid;
-        } catch(_){}
+      try { if (typeof currentNode !== 'undefined' && currentNode && currentNode._id) nodeid = currentNode._id; } catch(_){}
+      if (!nodeid) { try { var qs = new URLSearchParams(location.search); nodeid = qs.get('gotonode') || qs.get('nodeid') || qs.get('id') || ''; } catch(_) {} }
+      var href = '/plugin/vpnnetfile/view' + (nodeid ? ('?nodeid=' + encodeURIComponent(nodeid)) : '');
+
+      // 1) пробуем вставить СРАЗУ ПОСЛЕ «Run» в панели «Действия»
+      var runBtn = document.querySelector('#MainMenuSpan input[value="Run"], #MainMenuSpan input[value="RUN"], #MainMenuSpan input[value="run"]');
+      if (runBtn) {
+        // удалим резервный ярлык, если был
+        var fabTop = document.getElementById('vpnnetfile_topfab');
+        if (fabTop && fabTop.parentNode) fabTop.parentNode.removeChild(fabTop);
+
+        // не дублируем
+        var exist = document.getElementById('vpnnetfile-action-btn');
+        if (!exist) {
+          var btn = document.createElement('input');
+          btn.type = 'button';
+          btn.id   = 'vpnnetfile-action-btn';
+          btn.value = 'VPN .network';
+          btn.className = 'dialog-button';
+          btn.style.marginLeft = '6px';
+          btn.onclick = function(){ window.open(href, '_blank', 'noopener'); };
+          runBtn.insertAdjacentElement('afterend', btn);
+        } else {
+          exist.onclick = function(){ window.open(href, '_blank', 'noopener'); };
+        }
+        return; // успех — выше уже не надо
       }
 
-      // создаём/обновляем iframe
-      var url = `${ROUTE_BASE}?` + (nodeid ? ('nodeid=' + encodeURIComponent(nodeid)) : '');
-      if (!container.__vpn_iframe) {
-        var iframe = document.createElement('iframe');
-        iframe.src = url;
-        iframe.style.width = '100%';
-        iframe.style.height = 'calc(100vh - 210px)';
-        iframe.style.border = '0';
-        container.appendChild(iframe);
-        container.__vpn_iframe = iframe;
-      } else {
-        container.__vpn_iframe.src = url;
+      // 2) если кнопка Run не найдена, пытаемся в саму ячейку панели
+      var actionsRow = document.querySelector('#MainMenuSpan table tr');
+      var td = actionsRow ? (actionsRow.querySelector('td:last-child') || actionsRow.lastElementChild) : null;
+      if (td) {
+        var ex2 = document.getElementById('vpnnetfile-action-btn');
+        if (!ex2) {
+          var b2 = document.createElement('input');
+          b2.type = 'button';
+          b2.id   = 'vpnnetfile-action-btn';
+          b2.value = 'VPN .network';
+          b2.className = 'dialog-button';
+          b2.style.marginLeft = '6px';
+          b2.onclick = function(){ window.open(href, '_blank', 'noopener'); };
+          td.appendChild(b2);
+        } else {
+          ex2.onclick = function(){ window.open(href, '_blank', 'noopener'); };
+        }
+        // и уберем резервный ярлык
+        var fabTop2 = document.getElementById('vpnnetfile_topfab');
+        if (fabTop2 && fabTop2.parentNode) fabTop2.parentNode.removeChild(fabTop2);
+        return;
       }
+
+      // 3) РЕЗЕРВ: компактный ярлык в правом ВЕРХНЕМ углу (под шапкой)
+      var fab = document.getElementById('vpnnetfile_topfab');
+      if (!fab) {
+        fab = document.createElement('a');
+        fab.id = 'vpnnetfile_topfab';
+        fab.textContent = 'VPN .network';
+        fab.target = '_blank'; fab.rel = 'noopener';
+        fab.style.position = 'fixed';
+        fab.style.top = '92px';            // выше!
+        fab.style.right = '18px';
+        fab.style.zIndex = 2147483000;
+        fab.style.background = '#2563eb';
+        fab.style.color = '#fff';
+        fab.style.padding = '10px 14px';
+        fab.style.borderRadius = '10px';
+        fab.style.font = '14px/1 system-ui,-apple-system,Segoe UI,Roboto,Arial';
+        fab.style.boxShadow = '0 6px 18px rgba(0,0,0,.35)';
+        fab.style.textDecoration = 'none';
+        fab.style.opacity = '.92';
+        fab.onmouseenter = function(){ fab.style.opacity = '1'; };
+        fab.onmouseleave = function(){ fab.style.opacity = '.92'; };
+        document.body.appendChild(fab);
+      }
+      fab.href = href;
+
     } catch (e) {
-      try { console.log('[vpnnetfile] onDeviceRefreshEnd error', e); } catch(_){}
+      try { console.error('[vpnnetfile] onDeviceRefreshEnd error', e); } catch {}
     }
   };
 
-  // Экспортируем Web-UI функции в браузер (важно!)
-  plugin.exports = ['registerPluginTab', 'onDeviceRefreshEnd'];
+  p.exports = ['onWebUIStartupEnd', 'onDeviceRefreshEnd'];
 
-  return plugin;
+  log('plugin loaded');
+  return p;
 };
