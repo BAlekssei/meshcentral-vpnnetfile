@@ -1,7 +1,7 @@
 {
 "name": "VPN Network File",
 "shortName": "vpnnetfile",
-"version": "0.0.9",
+"version": "0.0.10",
 "author": "you",
 "description": "Редактор /etc/systemd/network/10-vpn_vpn.network для Linux-узлов",
 "hasAdminPanel": false,
